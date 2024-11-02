@@ -116,7 +116,6 @@ async def check_mail(context: ContextTypes.DEFAULT_TYPE, user_id: int):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text('Unauthorized access')
         return
         
     if get_user_status(user_id):
@@ -132,7 +131,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if not is_authorized(user_id):
-        await update.message.reply_text('Unauthorized access')
         return
         
     if not get_user_status(user_id):
@@ -147,11 +145,28 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     await update.message.reply_text('🛑 Stopped email monitoring')
 
+async def startup(application: Application):
+    for user_id, status in config['allowed_users'].items():
+        if status:
+            try:
+                user_id = int(user_id)
+                task = asyncio.create_task(check_mail(application, user_id))
+                mail_tasks[user_id] = task
+                logger.info(f"Autostarted monitoring for user {user_id}")
+                await application.bot.send_message(
+                    chat_id=user_id,
+                    text="✅ Bot restarted, email monitoring resumed automatically"
+                )
+            except Exception as e:
+                logger.error(f"Error auto-starting monitoring for user {user_id}: {str(e)}")
+
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("stop", stop))
+    
+    application.job_queue.run_once(startup, 0)
     
     logger.info("Bot started")
     application.run_polling()
