@@ -1,24 +1,21 @@
 import json
 import asyncio
-from telethon import TelegramClient, events
-from telethon.tl.types import User
 import imaplib
 import email
 from email.header import decode_header
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
 with open('config.json', 'r') as f:
     config = json.load(f)
-
-api_id = config['telegram_api_id']
-api_hash = config['telegram_api_hash']
-bot_token = config['bot_token']
 
 EMAIL = config['email']
 PASSWORD = config['email_password']
 IMAP_SERVER = config['imap_server']
 CHECK_INTERVAL = config['check_interval']
+BOT_TOKEN = config['bot_token']
 
-client = TelegramClient('mail_monitor_bot', api_id, api_hash).start(bot_token=bot_token)
+mail_tasks = {}
 
 def is_authorized(user_id):
     return str(user_id) in config['allowed_users']
@@ -40,7 +37,7 @@ def get_email_body(email_message):
         return email_message.get_payload(decode=True).decode()
     return "No text content found"
 
-async def check_mail(user_id):
+async def check_mail(context: ContextTypes.DEFAULT_TYPE, user_id: int):
     while get_user_status(user_id):
         try:
             mail = imaplib.IMAP4_SSL(IMAP_SERVER)
@@ -75,40 +72,54 @@ async def check_mail(user_id):
                     f"{content}"
                 )
                 
-                await client.send_message(user_id, message)
+                await context.bot.send_message(chat_id=user_id, text=message)
                 
             mail.close()
             mail.logout()
         except Exception as e:
-            await client.send_message(user_id, f"Error checking mail: {str(e)}")
+            await context.bot.send_message(chat_id=user_id, text=f"Error checking mail: {str(e)}")
             
         await asyncio.sleep(CHECK_INTERVAL)
 
-@client.on(events.NewMessage(pattern='/start'))
-async def start_handler(event):
-    user_id = event.sender_id
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     if not is_authorized(user_id):
         return
         
     if get_user_status(user_id):
-        await event.respond('Monitoring is already running')
+        await update.message.reply_text('Monitoring is already running')
         return
         
     update_user_status(user_id, True)
-    await event.respond('Started email monitoring')
-    asyncio.create_task(check_mail(user_id))
+    await update.message.reply_text('Started email monitoring')
+    
+    task = asyncio.create_task(check_mail(context, user_id))
+    mail_tasks[user_id] = task
 
-@client.on(events.NewMessage(pattern='/stop'))
-async def stop_handler(event):
-    user_id = event.sender_id
+async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     if not is_authorized(user_id):
         return
         
     if not get_user_status(user_id):
-        await event.respond('Monitoring is not running')
+        await update.message.reply_text('Monitoring is not running')
         return
         
     update_user_status(user_id, False)
-    await event.respond('Stopped email monitoring')
+    
+    if user_id in mail_tasks:
+        mail_tasks[user_id].cancel()
+        del mail_tasks[user_id]
+        
+    await update.message.reply_text('Stopped email monitoring')
 
-client.run_until_disconnected()
+def main():
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("stop", stop))
+    
+    application.run_polling()
+
+if __name__ == '__main__':
+    main()
