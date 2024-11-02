@@ -1,0 +1,13 @@
+{
+    "telegram_api_id": "your_api_id",
+    "telegram_api_hash": "your_api_hash",
+    "bot_token": "your_bot_token",
+    "email": "your_yandex_email",
+    "email_password": "your_email_password",
+    "imap_server": "imap.yandex.ru",
+    "check_interval": 60,
+    "allowed_users": {
+        "123456789": false,
+        "987654321": false
+    }
+}
