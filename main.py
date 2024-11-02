@@ -4,11 +4,9 @@ import imaplib
 import email
 import logging
 from email.header import decode_header
-from datetime import datetime, timedelta
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Setup logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -25,7 +23,6 @@ CHECK_INTERVAL = config['check_interval']
 BOT_TOKEN = config['bot_token']
 
 mail_tasks = {}
-last_check_time = {}
 
 def is_authorized(user_id):
     return str(user_id) in config['allowed_users']
@@ -57,95 +54,62 @@ def get_email_body(email_message):
         return "Error extracting email content"
     return "No text content found"
 
-async def connect_to_mail():
-    mail = imaplib.IMAP4_SSL(IMAP_SERVER)
-    mail.login(EMAIL, PASSWORD)
-    return mail
-
 async def check_mail(context: ContextTypes.DEFAULT_TYPE, user_id: int):
-    retry_count = 0
-    max_retries = 3
-    
     while get_user_status(user_id):
         try:
-            since_time = last_check_time.get(user_id, datetime.now() - timedelta(minutes=1))
-            
-            mail = await connect_to_mail()
+            mail = imaplib.IMAP4_SSL(IMAP_SERVER)
+            mail.login(EMAIL, PASSWORD)
             mail.select('inbox')
             
-            search_criteria = f'SINCE "{since_time.strftime("%d-%b-%Y")}"'
-            _, messages = mail.search(None, search_criteria)
+            _, messages = mail.search(None, 'UNSEEN')
             
-            for num in messages[0].split():
-                try:
-                    _, msg = mail.fetch(num, '(RFC822)')
-                    email_body = msg[0][1]
-                    email_message = email.message_from_bytes(email_body)
-                    
-                    date_tuple = email.utils.parsedate_tz(email_message['Date'])
-                    if date_tuple:
-                        email_date = datetime.fromtimestamp(email.utils.mktime_tz(date_tuple))
-                        if email_date <= since_time:
-                            continue
-                    
-                    subject = decode_header(email_message["Subject"])[0][0]
-                    if isinstance(subject, bytes):
-                        subject = subject.decode('utf-8', 'ignore')
+            if messages[0]:
+                for num in messages[0].split():
+                    try:
+                        _, msg = mail.fetch(num, '(RFC822)')
+                        email_body = msg[0][1]
+                        email_message = email.message_from_bytes(email_body)
                         
-                    from_ = decode_header(email_message.get("From", ""))[0][0]
-                    if isinstance(from_, bytes):
-                        from_ = from_.decode('utf-8', 'ignore')
-                    
-                    content = get_email_body(email_message)
-                    
-                    if len(content) > 4000:
-                        content = content[:4000] + "...\n[Message truncated due to length]"
-                    
-                    message = (
-                        f"📧 New email\n\n"
-                        f"From: {from_}\n"
-                        f"Subject: {subject}\n"
-                        f"Received: {email_date.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                        f"\n--- Content ---\n\n"
-                        f"{content}"
-                    )
-                    
-                    await context.bot.send_message(chat_id=user_id, text=message)
-                    
-                except Exception as e:
-                    logger.error(f"Error processing individual email: {str(e)}")
-                    continue
-            
-            last_check_time[user_id] = datetime.now()
+                        subject = decode_header(email_message["Subject"])[0][0]
+                        if isinstance(subject, bytes):
+                            subject = subject.decode('utf-8', 'ignore')
+                            
+                        from_ = decode_header(email_message.get("From", ""))[0][0]
+                        if isinstance(from_, bytes):
+                            from_ = from_.decode('utf-8', 'ignore')
+                        
+                        content = get_email_body(email_message)
+                        
+                        if len(content) > 4000:
+                            content = content[:4000] + "...\n[Message truncated due to length]"
+                        
+                        message = (
+                            f"📧 New email\n\n"
+                            f"From: {from_}\n"
+                            f"Subject: {subject}\n"
+                            f"\n--- Content ---\n\n"
+                            f"{content}"
+                        )
+                        
+                        await context.bot.send_message(chat_id=user_id, text=message)
+                        logger.info(f"Sent email notification to user {user_id}")
+                        
+                    except Exception as e:
+                        logger.error(f"Error processing email: {str(e)}")
+                        continue
             
             mail.close()
             mail.logout()
-            retry_count = 0
             
-        except imaplib.IMAP4.error as e:
-            logger.error(f"IMAP error: {str(e)}")
-            retry_count += 1
-            if retry_count >= max_retries:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text="⚠️ Multiple connection failures. Monitoring stopped. Please use /start to resume."
-                )
-                update_user_status(user_id, False)
-                if user_id in mail_tasks:
-                    del mail_tasks[user_id]
-                return
         except Exception as e:
-            logger.error(f"Unexpected error: {str(e)}")
-            retry_count += 1
-            if retry_count >= max_retries:
+            logger.error(f"Error checking mail: {str(e)}")
+            try:
                 await context.bot.send_message(
                     chat_id=user_id,
-                    text=f"⚠️ Critical error: {str(e)}. Monitoring stopped. Please use /start to resume."
+                    text=f"⚠️ Error checking mail: {str(e)}"
                 )
-                update_user_status(user_id, False)
-                if user_id in mail_tasks:
-                    del mail_tasks[user_id]
-                return
+            except:
+                pass
                 
         await asyncio.sleep(CHECK_INTERVAL)
 
@@ -161,9 +125,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     update_user_status(user_id, True)
     await update.message.reply_text('✅ Started email monitoring')
-    
-    # Reset last check time when starting
-    last_check_time[user_id] = datetime.now()
     
     task = asyncio.create_task(check_mail(context, user_id))
     mail_tasks[user_id] = task
@@ -183,9 +144,6 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if user_id in mail_tasks:
         mail_tasks[user_id].cancel()
         del mail_tasks[user_id]
-        
-    if user_id in last_check_time:
-        del last_check_time[user_id]
         
     await update.message.reply_text('🛑 Stopped email monitoring')
 
