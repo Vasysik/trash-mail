@@ -8,6 +8,7 @@ from io import BytesIO
 from email.header import decode_header
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from bs4 import BeautifulSoup
 
 logging.basicConfig(
     level=logging.INFO,
@@ -40,8 +41,19 @@ def update_user_status(user_id, status):
 def contains_html(text):
     return bool(re.search(r'<[^>]+>', text))
 
+def extract_text_from_html(html_content):
+    try:
+        soup = BeautifulSoup(html_content, 'html.parser')
+        for script in soup(["script", "style"]):
+            script.decompose()
+        text = soup.get_text(separator='\n', strip=True)
+        text = re.sub(r'\n\s*\n', '\n\n', text)
+        return text.strip()
+    except Exception as e:
+        logger.error(f"Error extracting text from HTML: {str(e)}")
+        return "Error extracting text content"
+
 def prepare_html_content(content, from_addr, subject):
-    # Add HTML boilerplate if needed
     if not content.strip().lower().startswith('<!doctype') and not content.strip().lower().startswith('<html'):
         content = f"""
 <!DOCTYPE html>
@@ -60,25 +72,38 @@ def prepare_html_content(content, from_addr, subject):
 def get_email_body(email_message):
     try:
         if email_message.is_multipart():
+            html_content = None
+            text_content = None
+            
             for part in email_message.walk():
                 content_type = part.get_content_type()
+                try:
+                    payload = part.get_payload(decode=True)
+                    if payload is None:
+                        continue
+                    decoded_content = payload.decode('utf-8', 'ignore')
+                except Exception:
+                    continue
+
                 if content_type == "text/html":
-                    try:
-                        return part.get_payload(decode=True).decode(), True
-                    except UnicodeDecodeError:
-                        return part.get_payload(decode=True).decode('utf-8', 'ignore'), True
+                    html_content = decoded_content
                 elif content_type == "text/plain":
-                    try:
-                        return part.get_payload(decode=True).decode(), False
-                    except UnicodeDecodeError:
-                        return part.get_payload(decode=True).decode('utf-8', 'ignore'), False
+                    text_content = decoded_content
+
+            if html_content:
+                return html_content, True
+            elif text_content:
+                return text_content, False
         else:
-            content = email_message.get_payload(decode=True).decode('utf-8', 'ignore')
-            return content, contains_html(content)
+            content = email_message.get_payload(decode=True)
+            if content:
+                content = content.decode('utf-8', 'ignore')
+                return content, contains_html(content)
+            
+        return "No content found", False
     except Exception as e:
         logger.error(f"Error getting email body: {str(e)}")
         return "Error extracting email content", False
-    return "No content found", False
 
 def extract_email_address(email_str):
     match = re.search(r'<(.+?)>', email_str)
@@ -115,7 +140,8 @@ async def check_mail(context: ContextTypes.DEFAULT_TYPE, user_id: int):
                         
                         content, is_html = get_email_body(email_message)
                         
-                        if is_html:
+                        if is_html and content:
+                            plain_text = extract_text_from_html(content)
                             html_content = prepare_html_content(content, from_, subject)
                             
                             from_email = extract_email_address(from_)
@@ -126,8 +152,11 @@ async def check_mail(context: ContextTypes.DEFAULT_TYPE, user_id: int):
                                 f"📧 New email (HTML)\n\n"
                                 f"From: {from_}\n"
                                 f"Subject: {subject}\n"
-                                f"\nHTML content attached below."
+                                f"\n--- Text Content ---\n\n"
+                                f"{plain_text[:4000]}"
                             )
+                            if len(plain_text) > 4000:
+                                message += "\n...[Text content truncated]"
                             
                             await context.bot.send_message(chat_id=user_id, text=message)
                             
@@ -137,11 +166,12 @@ async def check_mail(context: ContextTypes.DEFAULT_TYPE, user_id: int):
                             await context.bot.send_document(
                                 chat_id=user_id,
                                 document=html_bytes,
-                                filename=filename
+                                filename=filename,
+                                caption="Full HTML version"
                             )
                             
                         else:
-                            if len(content) > 4000:
+                            if content and len(content) > 4000:
                                 content = content[:4000] + "...\n[Message truncated due to length]"
                             
                             message = (
