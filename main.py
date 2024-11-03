@@ -3,9 +3,12 @@ import asyncio
 import imaplib
 import email
 import logging
+import os
+import re
 from email.header import decode_header
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from datetime import datetime
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,6 +25,9 @@ IMAP_SERVER = config['imap_server']
 CHECK_INTERVAL = config['check_interval']
 BOT_TOKEN = config['bot_token']
 
+HTML_DIR = "email_html"
+os.makedirs(HTML_DIR, exist_ok=True)
+
 mail_tasks = {}
 
 def is_authorized(user_id):
@@ -35,24 +41,56 @@ def update_user_status(user_id, status):
     with open('config.json', 'w') as f:
         json.dump(config, f, indent=4)
 
+def contains_html(text):
+    return bool(re.search(r'<[^>]+>', text))
+
+def save_html_content(content, from_addr, subject):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    sanitized_subject = re.sub(r'[^\w\s-]', '', subject)[:30]  # Take first 30 chars
+    filename = f"{timestamp}_{sanitized_subject}.html"
+    filepath = os.path.join(HTML_DIR, filename)
+    
+    if not content.strip().lower().startswith('<!doctype') and not content.strip().lower().startswith('<html'):
+        content = f"""
+            <!DOCTYPE html>
+                <html>
+                <head>
+                    <meta charset="UTF-8">
+                    <title>{subject}</title>
+                </head>
+                <body>
+                    {content}
+                </body>
+            </html>
+        """
+    
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(content)
+    
+    return filepath
+
 def get_email_body(email_message):
     try:
         if email_message.is_multipart():
             for part in email_message.walk():
-                if part.get_content_type() == "text/plain":
+                content_type = part.get_content_type()
+                if content_type == "text/html":
                     try:
-                        return part.get_payload(decode=True).decode()
+                        return part.get_payload(decode=True).decode(), True
                     except UnicodeDecodeError:
-                        return part.get_payload(decode=True).decode('utf-8', 'ignore')
+                        return part.get_payload(decode=True).decode('utf-8', 'ignore'), True
+                elif content_type == "text/plain":
+                    try:
+                        return part.get_payload(decode=True).decode(), False
+                    except UnicodeDecodeError:
+                        return part.get_payload(decode=True).decode('utf-8', 'ignore'), False
         else:
-            try:
-                return email_message.get_payload(decode=True).decode()
-            except UnicodeDecodeError:
-                return email_message.get_payload(decode=True).decode('utf-8', 'ignore')
+            content = email_message.get_payload(decode=True).decode('utf-8', 'ignore')
+            return content, contains_html(content)
     except Exception as e:
         logger.error(f"Error getting email body: {str(e)}")
-        return "Error extracting email content"
-    return "No text content found"
+        return "Error extracting email content", False
+    return "No content found", False
 
 async def check_mail(context: ContextTypes.DEFAULT_TYPE, user_id: int):
     while get_user_status(user_id):
@@ -78,20 +116,40 @@ async def check_mail(context: ContextTypes.DEFAULT_TYPE, user_id: int):
                         if isinstance(from_, bytes):
                             from_ = from_.decode('utf-8', 'ignore')
                         
-                        content = get_email_body(email_message)
+                        content, is_html = get_email_body(email_message)
                         
-                        if len(content) > 4000:
-                            content = content[:4000] + "...\n[Message truncated due to length]"
-                        
-                        message = (
-                            f"📧 New email\n\n"
-                            f"From: {from_}\n"
-                            f"Subject: {subject}\n"
-                            f"\n--- Content ---\n\n"
-                            f"{content}"
-                        )
-                        
-                        await context.bot.send_message(chat_id=user_id, text=message)
+                        if is_html:
+                            html_path = save_html_content(content, from_, subject)
+                            
+                            message = (
+                                f"📧 New email (HTML)\n\n"
+                                f"From: {from_}\n"
+                                f"Subject: {subject}\n"
+                                f"\nHTML content saved and attached below."
+                            )
+                            
+                            await context.bot.send_message(chat_id=user_id, text=message)
+                            with open(html_path, 'rb') as html_file:
+                                await context.bot.send_document(
+                                    chat_id=user_id,
+                                    document=html_file,
+                                    filename=os.path.basename(html_path)
+                                )
+                            
+                        else:
+                            if len(content) > 4000:
+                                content = content[:4000] + "...\n[Message truncated due to length]"
+                            
+                            message = (
+                                f"📧 New email\n\n"
+                                f"From: {from_}\n"
+                                f"Subject: {subject}\n"
+                                f"\n--- Content ---\n\n"
+                                f"{content}"
+                            )
+                            
+                            await context.bot.send_message(chat_id=user_id, text=message)
+                            
                         logger.info(f"Sent email notification to user {user_id}")
                         
                     except Exception as e:
