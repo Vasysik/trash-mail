@@ -56,17 +56,17 @@ def extract_text_from_html(html_content):
 def prepare_html_content(content, from_addr, subject):
     if not content.strip().lower().startswith('<!doctype') and not content.strip().lower().startswith('<html'):
         content = f"""
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <title>{subject}</title>
-</head>
-<body>
-    {content}
-</body>
-</html>
-"""
+        <!DOCTYPE html>
+        <html>
+            <head>
+                <meta charset="UTF-8">
+                <title>{subject}</title>
+            </head>
+            <body>
+                {content}
+            </body>
+        </html>
+        """
     return content
 
 def get_email_body(email_message):
@@ -146,7 +146,7 @@ async def check_mail(context: ContextTypes.DEFAULT_TYPE, user_id: int):
                             
                             from_email = extract_email_address(from_)
                             to_email = EMAIL
-                            filename = f"From_{from_email}_To_{to_email}.html"
+                            filename = f"{str(from_email).split('@')[0]}_{str(to_email).split('@')[0]}.html"
                             
                             message = (
                                 f"📧 New email (HTML)\n\n"
@@ -194,15 +194,7 @@ async def check_mail(context: ContextTypes.DEFAULT_TYPE, user_id: int):
             mail.logout()
             
         except Exception as e:
-            logger.error(f"Error checking mail: {str(e)}")
-            try:
-                await context.bot.send_message(
-                    chat_id=user_id,
-                    text=f"⚠️ Error checking mail: {str(e)}"
-                )
-            except:
-                pass
-                
+            logger.error(f"Error checking mail: {str(e)}")                
         await asyncio.sleep(CHECK_INTERVAL)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
