@@ -3,12 +3,11 @@ import asyncio
 import imaplib
 import email
 import logging
-import os
 import re
+from io import BytesIO
 from email.header import decode_header
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
-from datetime import datetime
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,9 +23,6 @@ PASSWORD = config['email_password']
 IMAP_SERVER = config['imap_server']
 CHECK_INTERVAL = config['check_interval']
 BOT_TOKEN = config['bot_token']
-
-HTML_DIR = "email_html"
-os.makedirs(HTML_DIR, exist_ok=True)
 
 mail_tasks = {}
 
@@ -44,30 +40,22 @@ def update_user_status(user_id, status):
 def contains_html(text):
     return bool(re.search(r'<[^>]+>', text))
 
-def save_html_content(content, from_addr, subject):
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    sanitized_subject = re.sub(r'[^\w\s-]', '', subject)[:30]  # Take first 30 chars
-    filename = f"{timestamp}_{sanitized_subject}.html"
-    filepath = os.path.join(HTML_DIR, filename)
-    
+def prepare_html_content(content, from_addr, subject):
+    # Add HTML boilerplate if needed
     if not content.strip().lower().startswith('<!doctype') and not content.strip().lower().startswith('<html'):
         content = f"""
-            <!DOCTYPE html>
-                <html>
-                <head>
-                    <meta charset="UTF-8">
-                    <title>{subject}</title>
-                </head>
-                <body>
-                    {content}
-                </body>
-            </html>
-        """
-    
-    with open(filepath, 'w', encoding='utf-8') as f:
-        f.write(content)
-    
-    return filepath
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>{subject}</title>
+</head>
+<body>
+    {content}
+</body>
+</html>
+"""
+    return content
 
 def get_email_body(email_message):
     try:
@@ -91,6 +79,15 @@ def get_email_body(email_message):
         logger.error(f"Error getting email body: {str(e)}")
         return "Error extracting email content", False
     return "No content found", False
+
+def extract_email_address(email_str):
+    match = re.search(r'<(.+?)>', email_str)
+    if match:
+        return match.group(1)
+    match = re.search(r'[\w\.-]+@[\w\.-]+\.\w+', email_str)
+    if match:
+        return match.group(0)
+    return email_str
 
 async def check_mail(context: ContextTypes.DEFAULT_TYPE, user_id: int):
     while get_user_status(user_id):
@@ -119,22 +116,29 @@ async def check_mail(context: ContextTypes.DEFAULT_TYPE, user_id: int):
                         content, is_html = get_email_body(email_message)
                         
                         if is_html:
-                            html_path = save_html_content(content, from_, subject)
+                            html_content = prepare_html_content(content, from_, subject)
+                            
+                            from_email = extract_email_address(from_)
+                            to_email = EMAIL
+                            filename = f"From_{from_email}_To_{to_email}.html"
                             
                             message = (
                                 f"📧 New email (HTML)\n\n"
                                 f"From: {from_}\n"
                                 f"Subject: {subject}\n"
-                                f"\nHTML content saved and attached below."
+                                f"\nHTML content attached below."
                             )
                             
                             await context.bot.send_message(chat_id=user_id, text=message)
-                            with open(html_path, 'rb') as html_file:
-                                await context.bot.send_document(
-                                    chat_id=user_id,
-                                    document=html_file,
-                                    filename=os.path.basename(html_path)
-                                )
+                            
+                            html_bytes = BytesIO(html_content.encode('utf-8'))
+                            html_bytes.name = filename
+                            
+                            await context.bot.send_document(
+                                chat_id=user_id,
+                                document=html_bytes,
+                                filename=filename
+                            )
                             
                         else:
                             if len(content) > 4000:
