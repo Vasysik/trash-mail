@@ -230,6 +230,7 @@ async def stop(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text('🛑 Stopped email monitoring')
 
 async def startup(application: Application):
+    mail_tasks.clear()
     for user_id, status in config['allowed_users'].items():
         if status:
             try:
